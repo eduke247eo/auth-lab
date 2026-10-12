@@ -86,7 +86,73 @@ function requireAuth(req, res, next) {
       next();
     });
 }
+app.post("/api/change-password", requireAuth, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body || {};
 
+    
+    if (
+      typeof oldPassword !== "string" ||
+      typeof newPassword !== "string"
+    ) {
+      return res.status(400).json({
+        error: "Хуучин болон шинэ нууц үг шаардлагатай"
+      });
+    }
+
+    
+    if (
+      newPassword.length < 8 ||
+      Buffer.byteLength(newPassword, "utf8") > 72
+    ) {
+      return res.status(400).json({
+        error: "Шинэ нууц үг 8-аас доошгүй, 72 byte-аас ихгүй байна"
+      });
+    }
+
+    
+    const [rows] = await pool.query(
+      "SELECT password_hash FROM users WHERE id = ?",
+      [req.user.userId]
+    );
+
+    if (!rows[0]) {
+      return res.status(404).json({
+        error: "Хэрэглэгч олдсонгүй"
+      });
+    }
+
+    
+    const isValid = await bcrypt.compare(
+      oldPassword,
+      rows[0].password_hash
+    );
+
+    if (!isValid) {
+      return res.status(401).json({
+        error: "Хуучин нууц үг буруу"
+      });
+    }
+
+    
+    const newHash = await bcrypt.hash(newPassword, 10);
+
+    
+    await pool.query(
+      "UPDATE users SET password_hash = ? WHERE id = ?",
+      [newHash, req.user.userId]
+    );
+
+    return res.status(200).json({
+      message: "Нууц үг амжилттай солигдлоо"
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: "Серверийн алдаа"
+    });
+  }
+});
 function requireRole(role) {
   return (req, res, next) => {
     if (req.user.role !== role) {
