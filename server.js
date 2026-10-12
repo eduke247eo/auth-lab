@@ -4,6 +4,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
 const cookieParser = require("cookie-parser");
+const crypto = require("crypto");
 const loginLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 5,
@@ -24,7 +25,44 @@ const pool = mysql.createPool({
   host: "127.0.0.1", user: "root",
   password: "", database: "auth_db"
 });
+function createRefreshToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
+function hashRefreshToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function setAuthCookies(res, accessToken, refreshToken) {
+  const cookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/"
+  };
+
+  res.cookie("accessToken", accessToken, {
+    ...cookieOptions,
+    maxAge: 15 * 60 * 1000
+  });
+
+  res.cookie("refreshToken", refreshToken, {
+    ...cookieOptions,
+    maxAge: 7 * 24 * 60 * 60 * 1000
+  });
+}
+
+function clearAuthCookies(res) {
+  const cookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/"
+  };
+
+  res.clearCookie("accessToken", cookieOptions);
+  res.clearCookie("refreshToken", cookieOptions);
+}
 app.post("/api/register", async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -92,16 +130,29 @@ res.json({ message: "Амжилттай нэвтэрлээ" });
   }
 });
 function requireAuth(req, res, next) {
-  const auth = req.headers.authorization;
-  const token = auth && auth.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Токен алга" });
+  const token = req.cookies.accessToken;
 
-  jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] },
+  if (!token) {
+    return res.status(401).json({
+      error: "Токен алга"
+    });
+  }
+
+  jwt.verify(
+    token,
+    process.env.JWT_SECRET,
+    { algorithms: ["HS256"] },
     (err, payload) => {
-      if (err) return res.status(403).json({ error: "Хүчингүй токен" });
+      if (err) {
+        return res.status(403).json({
+          error: "Хүчингүй токен"
+        });
+      }
+
       req.user = payload;
       next();
-    });
+    }
+  );
 }
 app.post("/api/change-password", requireAuth, async (req, res) => {
   try {
@@ -198,5 +249,123 @@ app.get("/api/profile", requireAuth, async (req, res) => {
 app.get("/api/admin", requireAuth, requireRole("admin"), (req, res) => {
   res.json({ message: "Админ хэсэг. Хэрэглэгч №" + req.user.userId });
 });
+app.post("/api/refresh", async (req, res) => {
+  const token = req.cookies.refreshToken;
 
+  if (!token) {
+    return res.status(401).json({
+      error: "Refresh token алга"
+    });
+  }
+
+  let connection;
+
+  try {
+    const tokenHash = hashRefreshToken(token);
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [rows] = await connection.query(
+      `SELECT id, user_id
+       FROM refresh_tokens
+       WHERE token_hash = ? AND expires_at > NOW()`,
+      [tokenHash]
+    );
+
+    if (!rows.length) {
+      await connection.rollback();
+      clearAuthCookies(res);
+
+      return res.status(401).json({
+        error: "Refresh token хүчингүй эсвэл хугацаа дууссан"
+      });
+    }
+
+    const storedToken = rows[0];
+
+    // Хуучин refresh token-ийг хүчингүй болгоно.
+    const [deleted] = await connection.query(
+      "DELETE FROM refresh_tokens WHERE id = ?",
+      [storedToken.id]
+    );
+
+    if (deleted.affectedRows !== 1) {
+      await connection.rollback();
+      clearAuthCookies(res);
+
+      return res.status(401).json({
+        error: "Refresh token хүчингүй"
+      });
+    }
+
+    const [users] = await connection.query(
+      "SELECT id, role FROM users WHERE id = ?",
+      [storedToken.user_id]
+    );
+
+    if (!users.length) {
+      await connection.rollback();
+      clearAuthCookies(res);
+
+      return res.status(401).json({
+        error: "Хэрэглэгч олдсонгүй"
+      });
+    }
+
+    const user = users[0];
+
+    const newAccessToken = jwt.sign(
+      { userId: user.id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "15m", algorithm: "HS256" }
+    );
+
+    const newRefreshToken = createRefreshToken();
+    const newHash = hashRefreshToken(newRefreshToken);
+
+    await connection.query(
+      `INSERT INTO refresh_tokens
+       (user_id, token_hash, expires_at)
+       VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))`,
+      [user.id, newHash]
+    );
+
+    await connection.commit();
+
+    setAuthCookies(res, newAccessToken, newRefreshToken);
+
+    res.json({ message: "Token амжилттай шинэчлэгдлээ" });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+
+    console.error(err);
+    res.status(500).json({ error: "Серверийн алдаа" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+app.post("/api/logout", async (req, res) => {
+  try {
+    const token = req.cookies.refreshToken;
+
+    if (token) {
+      const tokenHash = hashRefreshToken(token);
+
+      await pool.query(
+        "DELETE FROM refresh_tokens WHERE token_hash = ?",
+        [tokenHash]
+      );
+    }
+
+    clearAuthCookies(res);
+
+    res.json({ message: "Амжилттай гарлаа" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Серверийн алдаа" });
+  }
+});
 app.listen(3000, () => console.log("http://localhost:3000"));
