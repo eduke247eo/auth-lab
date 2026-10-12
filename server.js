@@ -3,6 +3,7 @@ const mysql = require("mysql2/promise");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
+const cookieParser = require("cookie-parser");
 const loginLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 5,
@@ -14,7 +15,9 @@ if (!process.env.JWT_SECRET) {
   process.exit(1);
 }
 const app = express();
+
 app.use(express.json());
+app.use(cookieParser());
 app.use(express.static("public"));
 
 const pool = mysql.createPool({
@@ -74,7 +77,15 @@ app.post("/api/login", loginLimiter,async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: "15m" }
     );
-    res.json({ token });
+    res.cookie("accessToken", token, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "strict",
+  maxAge: 15 * 60 * 1000,
+  path: "/"
+});
+
+res.json({ message: "Амжилттай нэвтэрлээ" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Серверийн алдаа" });
