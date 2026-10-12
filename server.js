@@ -28,12 +28,18 @@ app.post("/api/register", async (req, res) => {
     if (typeof email !== "string" || !email.includes("@")) {
       return res.status(400).json({ error: "И-мэйл буруу байна" });
     }
-    if (typeof password !== "string" || password.length < 8
-        || Buffer.byteLength(password) > 72) {
-      return res.status(400).json({
-        error: "Нууц үг 8-аас доошгүй, 72 byte-аас ихгүй байна"
-      });
-    }
+    if (
+  typeof password !== "string" ||
+  password.length < 8 ||
+  Buffer.byteLength(password, "utf8") > 72 ||
+  !/[A-Z]/.test(password) ||
+  !/[a-z]/.test(password) ||
+  !/[0-9]/.test(password)
+) {
+  return res.status(400).json({
+    error: "Нууц үг хамгийн багадаа 8 тэмдэгттэй, том үсэг, жижиг үсэг, тоо агуулсан байх ёстой"
+  });
+}
     const hash = await bcrypt.hash(password, 10);
     const [r] = await pool.query(
       "INSERT INTO users (email, password_hash) VALUES (?, ?)",
